@@ -1,11 +1,9 @@
-Opis działania programu
-=============================================
+# **Opis wykonania zadania rekrutacyjnego**
 
-1. Cel programu
----------------
+## 1. Cel
 
-Program jest prototypem rozwiązania do automatycznego rozpoznawania nazw
-własnych w polskich dokumentach PDF. Jego głównym zadaniem jest pobranie tekstu
+Ukazany w notebooku pipeline jest prototypem rozwiązania do automatycznego oznaczenia encji 
+nazywanych (NER) w polskich dokumentach PDF. Jego głównym zadaniem jest pobranie tekstu
 z pliku PDF, podzielenie go na tokeny i fragmenty tekstu, uruchomienie modelu
 NER, a następnie zapisanie rozpoznanych encji jako etykiet BIO przypisanych do
 poszczególnych tokenów.
@@ -13,20 +11,21 @@ poszczególnych tokenów.
 Rozpoznawane i zachowywane są encje:
 - PERSON, czyli osoby,
 - ORGANIZATION, czyli organizacje,
-- CITY, czyli miejscowości,
+- CITY, czyli miasta/miejscowości,
 - STREET, czyli lokalizacje/ulice/adresy.
 
-2. Używane biblioteki i model
------------------------------
+## 2. Używane biblioteki i model
 
 Program korzysta z następujących bibliotek:
-- os - obsługa ścieżek i plików,
+- os, glob - obsługa ścieżek i plików,
 - pdfplumber - odczyt tekstu z dokumentów PDF,
 - re - tokenizacja tekstu za pomocą wyrażeń regularnych,
-- transformers - uruchomienie modelu językowego do klasyfikacji tokenów.
+- pytorch-transformers - uruchomienie modelu językowego do klasyfikacji tokenów (z Hugging Face).
 
 Do rozpoznawania encji używany jest model Hugging Face:
 lexedit/herbert-polish-legal-ner
+Model jest oparty na HerBERT, został dostrojony do polskich dokumentów prawnych 
+i administracyjnych, przez co idealnie nadaje się do tego zadania.
 
 Model jest uruchamiany przez pipeline:
 pipeline("token-classification", model="lexedit/herbert-polish-legal-ner",
@@ -35,8 +34,7 @@ aggregation_strategy="simple")
 Strategia aggregation_strategy="simple" powoduje, że sąsiadujące tokeny
 należące do tej samej encji są scalane w jedną encję.
 
-3. Dane wejściowe
------------------
+## 3. Przygotowanie danych wejściowych
 
 Dane wejściowe to zbiór danych (dokumenty PDF) zebrane w data/zbior_danych/...
 
@@ -48,16 +46,15 @@ Notatnik korzysta też z plików pomocniczych znajdujących się w katalogu
 constants:
 
 - PERSON_TITLES.json - lista tytułów i zwrotów używanych przy osobach,
-- FORMYPRAWNEORG.json - lista form prawnych i określeń organizacji,
+- ORG_ADDONS.json - lista form prawnych i określeń organizacji,
 - CITIES.json - lista miast oraz ich odmian.
 
-Z plików tych wczytywane są zmienne PERSON_TITLES, FORMYPRAWNEORG oraz CITIES,
+Z plików tych wczytywane są zmienne PERSON_TITLES, ORG_ADDONS oraz CITIES,
 które są używane w dodatkowych funkcjach walidujących i poprawiających etykiety
 BIO.
 
 
-4. Ekstrakcja tekstu z PDF
---------------------------
+## 4. Ekstrakcja tekstu z PDF
 
 Funkcja extract_text_from_pdf(pdf_path) otwiera pojedynczy plik PDF za pomocą
 pdfplumber. Następnie przechodzi po wszystkich stronach dokumentu i pobiera
@@ -74,19 +71,17 @@ Dzięki temu wielokrotne spacje, znaki nowej linii i inne separatory są
 sprowadzane do pojedynczych spacji. Funkcja zwraca jeden długi string
 zawierający cały tekst wybranego dokumentu PDF.
 
-W notatniku tekst jest pobierany dla jednego dokumentu:
 
-pdf_text = extract_text_from_pdf(pdf_paths[x])
+## 5. Tokenizacja tekstu
 
-5. Tokenizacja tekstu
----------------------
+Funkcja tokenize_text(pdf_text) dzieli wyekstrahowany tekst na tokeny. 
+W założeniach zadania określone jest, że jeden token to w rzeczywistości 
+jedno słowo. Przez to nie użyty został standardowy tokenizer, a proste
+wyrażenie regularne:
 
-Funkcja tokenize_text(pdf_text) dzieli wyekstrahowany tekst na tokeny. Używa do
-tego wyrażenia regularnego:
+'\d{2}-\d{3}|[\w]+|[^\w\s]'
 
-\d{2}-\d{3}|[\w]+|[^\w\s]
-
-Wzorzec rozpoznaje:
+Wzorzec ten rozpoznaje:
 - kody w formacie 00-000, na przykład kody pocztowe,
 - ciągi znaków słownych, czyli słowa i liczby,
 - pojedyncze znaki interpunkcyjne lub symbole.
@@ -106,14 +101,14 @@ Przykładowa struktura tokenu:
     "label": "O"
 }
 
-6. Dzielenie tekstu na chunki
------------------------------
+
+## 6. Dzielenie tekstu na chunki
 
 Ponieważ modele językowe mają ograniczoną długość wejścia, program dzieli tekst
 na mniejsze fragmenty, czyli chunki. Odpowiada za to funkcja create_chunks(text,
 tokens).
 
-W notatniku ustawiono:
+W pipeline-ie ustawiono:
 - CHUNK_SIZE = 180,
 - OVERLAP = 30.
 
@@ -127,14 +122,15 @@ Funkcja zwraca listę słowników. Każdy chunk zawiera:
 - end - pozycję ostatniego znaku chunka w całym tekście.
 
 Pozycje start i end są ważne, ponieważ pozwalają później przeliczyć lokalizację
-encji wykrytej w chunku na lokalizację w pełnym tekście dokumentu.
+encji wykrytej w chunku na lokalizację w pełnym tekście dokumentu, co jest
+jednym z wymagań zadania.
 
-7. Klasyfikacja encji przez model NER
--------------------------------------
+
+## 7. Klasyfikacja encji przez model NER
 
 Funkcja classify_tokens(chunk) uruchamia model NER na tekście pojedynczego
 chunka. Model zwraca listę rozpoznanych encji wraz z etykietami, wynikiem
-pewności oraz pozycjami start/end liczonymi względem początku chunka.
+pewności oraz pozycjami start oraz end liczonymi względem początku chunka.
 
 Program przelicza te pozycje na indeksy względem całego dokumentu:
 
@@ -144,8 +140,7 @@ result["end"] += chunk["start"]
 Dzięki temu każda encja może być później porównana z listą tokenów całego
 dokumentu.
 
-8. Filtrowanie i mapowanie etykiet
-----------------------------------
+## 8. Filtrowanie i mapowanie etykiet
 
 Model zwraca własne typy etykiet. Funkcja filter_entities(entities) zostawia
 tylko te typy, które są potrzebne w projekcie, oraz zmienia ich nazwy na format
@@ -158,8 +153,8 @@ docelowy:
 
 Encje z innymi etykietami są usuwane z listy wyników.
 
-9. Walidacja encji
-------------------
+
+## 9. Walidacja encji
 
 Funkcja validate_entities(entities, tokens) sprawdza, czy encje zwrócone przez
 model pasują do tokenów utworzonych wcześniej z całego dokumentu.
@@ -176,8 +171,8 @@ listę errors i jest usuwana z dalszego przetwarzania.
 Ten etap ma zabezpieczać przed sytuacją, w której model zwróci encję o
 lokalizacji niezgodnej z tokenizacją tekstu.
 
-10. Oznaczanie encji o niskiej pewności
----------------------------------------
+
+## 10. Oznaczanie encji o niskiej pewności
 
 Funkcja flag_low_confidence(entities) wyszukuje encje, dla których score jest
 mniejszy niż 0.8. Takie encje są zbierane na osobnej liście
@@ -186,8 +181,13 @@ low_confidence_entities.
 Program nie usuwa ich automatycznie z wyniku, ale oznacza je jako przypadki,
 które mogą wymagać ręcznej weryfikacji.
 
-11. Mapowanie encji na tokeny w formacie BIO
---------------------------------------------
+W przypadku wykonywania tego zadania w wyznaczonym czasie nie udało się wykonać
+założeń związanych z błędnymi encjami z walidacji (punkt 9.) oraz encji o niskiej
+pewności. W docelowym rozwiązaniu user manualnie oznacza te encje, co zmniejsza
+powstałe błędy w mapowaniu.
+
+
+## 11. Mapowanie encji na tokeny w formacie BIO
 
 Funkcja mapping_entities_on_tokens(entities, tokens) wpisuje rozpoznane encje do
 listy tokenów. Wykorzystywany jest format BIO:
@@ -207,8 +207,7 @@ Dla encji wielowyrazowych pierwszy token dostaje etykietę B-, a następne token
 tej samej encji etykietę I-. Po przypisaniu wszystkich tokenów danej encji
 program przechodzi do kolejnej encji.
 
-12. Automatyczne przetwarzanie wszystkich chunków
--------------------------------------------------
+## 12. Automatyczne przetwarzanie pełnego PDFa
 
 Funkcja auto_NER_function(chunks, pdf_tokens) scala wcześniejsze kroki w jeden
 proces. Dla każdego chunka wykonywane są kolejno:
@@ -259,27 +258,13 @@ spana dostają etykietę O. Dzięki temu nazwy wielowyrazowe, takie jak Biała
 Podlaska, pozostają oznaczone poprawnie, a błędne rozpoznania typu Sąd
 Najwyższy jako CITY są usuwane.
 
-13. Komórki pomocnicze dla Label Studio
----------------------------------------
+Ogólnym założeniem postprocessingu jest ciągłe ulepszanie otrzymywanego outputu,
+za pomocą nowych reguł oraz innych funkcjonalości pipeline-u. W przypadku, gdyby
+wymagania byłyby inaczej określone lub chcielibyśmy zwiększyć doładność wyniklów
+możemy w łatwy sposób dodać nowe funkcje.
 
-W notatniku znajdują się też zakomentowane komórki przeznaczone do przygotowania
-danych dla Label Studio. Ich zadaniem jest:
 
-- zapis wyekstrahowanego tekstu do plików .txt,
-- zapis danych do plików .json w strukturze:
-
-{
-    "data": {
-        "text": "...",
-        "source": "nazwa_pliku.txt"
-    }
-}
-
-Te komórki są obecnie ujęte w potrójne cudzysłowy, więc nie wykonują się jako
-aktywna część programu. Zachowane zostały jako artefakty z procesu pracy nad projektem.
-
-14. Wynik działania programu
-----------------------------
+## 14. Wynik działania programu
 
 Końcowym wynikiem działania programu jest lista tokenów dokumentu PDF. Każdy
 token zawiera:
@@ -296,20 +281,30 @@ Dodatkowo program zwraca:
 Tak przygotowane dane mogą być użyte do dalszej analizy, ręcznej walidacji
 i co najważniejsze, zgodnie z wymaganiami zadania, wygenerowaniem pliku JSONL z końcowym raportem
 
-15. Najważniejsze ograniczenia obecnej wersji
----------------------------------------------
+## 15. Najważniejsze ograniczenia obecnej wersji pipeline-u oraz wnioski
+
 
 Obecna wersja jest prototypem i ma kilka ograniczeń:
 
-- przetwarzany jest jeden wybrany dokument PDF na raz ze względu na ograniczony czas
-  na wykonanie zadania oraz moc sprzętową,
-- funkcja classify_tokens tworzy pipeline modelu przy każdym wywołaniu, co może
-  znacząco spowalniać przetwarzanie wielu chunków,
-- mapowanie encji na tokeny zakłada, że lista encji jest niepusta i prawidłowo
-  uporządkowana
+- nie została zaimplementowany OCR dokumentów skanowanych. Niestety ze względu
+  na brak czasu musi to zostać określone jako funkcjonalność teog pipeline-u w przyszłości.
+- początkowo wykrywane encje miały być określone jako @dataclass, jednak ze względu na 
+  zawiłość zadania oraz brak czasu zdecydowałam się na proste operacje na zmiennych.
+  Jeśli pipeline miałby być rozwijany na pewno byłaby to jedna z pierwszych rzeczy do zmiany.
+- poprzedni punkt ma też duży wpływ na wydajność pipeline-u. Podczas wykonywania zadania
+  przyjęto, że otrzymanie rozwiązania jest głównym wyznacznikiem, przez co wiele funkcji
+  iteruje po tokenach kilka razy. Dodatkowo powinno się przygotować garbage
+  collector, który zwalniałby podczas procesu pamięć z niepotrzebnych danych.
+- Nie jest to najlepszym możliwym rozwiązaniem tego zadania. Tak jak było
+  wspominane już w poprzednim punkcie, głównym celem było uzyskanie rozwiązania. Prawdę mówiąc,
+  w przypadku większej ilości czasu na zadanie zdecydowałabym się na przygotowanie z otrzymanych
+  danych zbioru do nauki, testowania oraz walidacji i spróbowała przeprowadzić finetuning modelu
+  HerBERT dla problemu z zadania. Dodatkowo można by było podłączyć API modelu LLM jako
+  dodatkowe źródło dla trudnych przypadków. Oczywiście dodać pełną kontrolę oznaczanych dokumentów
+  i możliwy active learning z kolejnych zatwierdzanych dokumentów.
 
-16. Ogólny schemat przepływu danych
------------------------------------
+
+## 16. Ogólny schemat przepływu danych w aktualnej wersji
 
 PDF
  -> tekst wyciągnięty przez pdfplumber
@@ -322,3 +317,4 @@ PDF
  -> etykiety BIO wpisane do tokenów
  -> walidacja tytułów osób, form prawnych organizacji i nazw miast
  -> lista tokenów gotowa do dalszego użycia
+ => Output w JSONL dla każdego źródła w folderze /data wg wymagań zadania
