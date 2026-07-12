@@ -1,0 +1,324 @@
+Opis działania programu
+=============================================
+
+1. Cel programu
+---------------
+
+Program jest prototypem rozwiązania do automatycznego rozpoznawania nazw
+własnych w polskich dokumentach PDF. Jego głównym zadaniem jest pobranie tekstu
+z pliku PDF, podzielenie go na tokeny i fragmenty tekstu, uruchomienie modelu
+NER, a następnie zapisanie rozpoznanych encji jako etykiet BIO przypisanych do
+poszczególnych tokenów.
+
+Rozpoznawane i zachowywane są encje:
+- PERSON, czyli osoby,
+- ORGANIZATION, czyli organizacje,
+- CITY, czyli miejscowości,
+- STREET, czyli lokalizacje/ulice/adresy.
+
+2. Używane biblioteki i model
+-----------------------------
+
+Program korzysta z następujących bibliotek:
+- os - obsługa ścieżek i plików,
+- pdfplumber - odczyt tekstu z dokumentów PDF,
+- re - tokenizacja tekstu za pomocą wyrażeń regularnych,
+- transformers - uruchomienie modelu językowego do klasyfikacji tokenów.
+
+Do rozpoznawania encji używany jest model Hugging Face:
+lexedit/herbert-polish-legal-ner
+
+Model jest uruchamiany przez pipeline:
+pipeline("token-classification", model="lexedit/herbert-polish-legal-ner",
+aggregation_strategy="simple")
+
+Strategia aggregation_strategy="simple" powoduje, że sąsiadujące tokeny
+należące do tej samej encji są scalane w jedną encję.
+
+3. Dane wejściowe
+-----------------
+
+Dane wejściowe to zbiór danych (dokumenty PDF) zebrane w data/zbior_danych/...
+
+Funkcja get_pdf_paths(path) sprawdza, czy wskazany katalog istnieje, a następnie
+przegląda jego zawartość i wybiera pliki z rozszerzeniem .pdf. Zwracana jest
+lista ścieżek do znalezionych dokumentów.
+
+Notatnik korzysta też z plików pomocniczych znajdujących się w katalogu
+constants:
+
+- PERSON_TITLES.json - lista tytułów i zwrotów używanych przy osobach,
+- FORMYPRAWNEORG.json - lista form prawnych i określeń organizacji,
+- CITIES.json - lista miast oraz ich odmian.
+
+Z plików tych wczytywane są zmienne PERSON_TITLES, FORMYPRAWNEORG oraz CITIES,
+które są używane w dodatkowych funkcjach walidujących i poprawiających etykiety
+BIO.
+
+
+4. Ekstrakcja tekstu z PDF
+--------------------------
+
+Funkcja extract_text_from_pdf(pdf_path) otwiera pojedynczy plik PDF za pomocą
+pdfplumber. Następnie przechodzi po wszystkich stronach dokumentu i pobiera
+tekst metodą:
+
+page.extract_text(layout=True)
+
+Parametr layout=True pomaga zachować układ tekstu z dokumentu. Po pobraniu
+tekstu program normalizuje białe znaki instrukcją:
+
+" ".join(pdf_text.split())
+
+Dzięki temu wielokrotne spacje, znaki nowej linii i inne separatory są
+sprowadzane do pojedynczych spacji. Funkcja zwraca jeden długi string
+zawierający cały tekst wybranego dokumentu PDF.
+
+W notatniku tekst jest pobierany dla jednego dokumentu:
+
+pdf_text = extract_text_from_pdf(pdf_paths[x])
+
+5. Tokenizacja tekstu
+---------------------
+
+Funkcja tokenize_text(pdf_text) dzieli wyekstrahowany tekst na tokeny. Używa do
+tego wyrażenia regularnego:
+
+\d{2}-\d{3}|[\w]+|[^\w\s]
+
+Wzorzec rozpoznaje:
+- kody w formacie 00-000, na przykład kody pocztowe,
+- ciągi znaków słownych, czyli słowa i liczby,
+- pojedyncze znaki interpunkcyjne lub symbole.
+
+Dla każdego tokenu tworzony jest słownik zawierający:
+- token - tekst tokenu,
+- start - pozycję początkową tokenu w całym tekście,
+- end - pozycję końcową tokenu w całym tekście,
+- label - początkową etykietę "O", oznaczającą brak encji.
+
+Przykładowa struktura tokenu:
+
+{
+    "token": "Warszawa",
+    "start": 120,
+    "end": 128,
+    "label": "O"
+}
+
+6. Dzielenie tekstu na chunki
+-----------------------------
+
+Ponieważ modele językowe mają ograniczoną długość wejścia, program dzieli tekst
+na mniejsze fragmenty, czyli chunki. Odpowiada za to funkcja create_chunks(text,
+tokens).
+
+W notatniku ustawiono:
+- CHUNK_SIZE = 180,
+- OVERLAP = 30.
+
+Oznacza to, że każdy chunk zawiera maksymalnie 180 tokenów, a kolejne chunki
+nachodzą na siebie na 30 tokenów. Dzięki temu encje znajdujące się na granicy
+dwóch fragmentów mają większą szansę zostać poprawnie rozpoznane.
+
+Funkcja zwraca listę słowników. Każdy chunk zawiera:
+- text - fragment oryginalnego tekstu,
+- start - pozycję pierwszego znaku chunka w całym tekście,
+- end - pozycję ostatniego znaku chunka w całym tekście.
+
+Pozycje start i end są ważne, ponieważ pozwalają później przeliczyć lokalizację
+encji wykrytej w chunku na lokalizację w pełnym tekście dokumentu.
+
+7. Klasyfikacja encji przez model NER
+-------------------------------------
+
+Funkcja classify_tokens(chunk) uruchamia model NER na tekście pojedynczego
+chunka. Model zwraca listę rozpoznanych encji wraz z etykietami, wynikiem
+pewności oraz pozycjami start/end liczonymi względem początku chunka.
+
+Program przelicza te pozycje na indeksy względem całego dokumentu:
+
+result["start"] += chunk["start"]
+result["end"] += chunk["start"]
+
+Dzięki temu każda encja może być później porównana z listą tokenów całego
+dokumentu.
+
+8. Filtrowanie i mapowanie etykiet
+----------------------------------
+
+Model zwraca własne typy etykiet. Funkcja filter_entities(entities) zostawia
+tylko te typy, które są potrzebne w projekcie, oraz zmienia ich nazwy na format
+docelowy:
+
+- PER -> PERSON,
+- ORG -> ORGANIZATION,
+- LOC_PUB -> CITY,
+- LOC -> STREET.
+
+Encje z innymi etykietami są usuwane z listy wyników.
+
+9. Walidacja encji
+------------------
+
+Funkcja validate_entities(entities, tokens) sprawdza, czy encje zwrócone przez
+model pasują do tokenów utworzonych wcześniej z całego dokumentu.
+
+Dla encji jednoelementowych sprawdzane są:
+- zgodność tekstu tokenu,
+- zgodność pozycji start,
+- zgodność pozycji end.
+
+Dla encji wielowyrazowych program osobno sprawdza pierwszy i ostatni token
+encji. Jeśli encja nie może zostać odnaleziona w tokenach dokumentu, trafia na
+listę errors i jest usuwana z dalszego przetwarzania.
+
+Ten etap ma zabezpieczać przed sytuacją, w której model zwróci encję o
+lokalizacji niezgodnej z tokenizacją tekstu.
+
+10. Oznaczanie encji o niskiej pewności
+---------------------------------------
+
+Funkcja flag_low_confidence(entities) wyszukuje encje, dla których score jest
+mniejszy niż 0.8. Takie encje są zbierane na osobnej liście
+low_confidence_entities.
+
+Program nie usuwa ich automatycznie z wyniku, ale oznacza je jako przypadki,
+które mogą wymagać ręcznej weryfikacji.
+
+11. Mapowanie encji na tokeny w formacie BIO
+--------------------------------------------
+
+Funkcja mapping_entities_on_tokens(entities, tokens) wpisuje rozpoznane encje do
+listy tokenów. Wykorzystywany jest format BIO:
+
+- B-TYP - pierwszy token encji,
+- I-TYP - kolejny token tej samej encji,
+- O - token spoza encji.
+
+Przykład:
+
+Jan        B-PERSON
+Kowalski   I-PERSON
+z          O
+Warszawy   B-CITY
+
+Dla encji wielowyrazowych pierwszy token dostaje etykietę B-, a następne tokeny
+tej samej encji etykietę I-. Po przypisaniu wszystkich tokenów danej encji
+program przechodzi do kolejnej encji.
+
+12. Automatyczne przetwarzanie wszystkich chunków
+-------------------------------------------------
+
+Funkcja auto_NER_function(chunks, pdf_tokens) scala wcześniejsze kroki w jeden
+proces. Dla każdego chunka wykonywane są kolejno:
+
+1. klasyfikacja encji modelem NER,
+2. pominięcie chunka, jeśli model nic nie znalazł,
+3. filtrowanie encji do wymaganych typów,
+4. walidacja encji względem tokenów dokumentu,
+5. zapis encji o niskiej pewności,
+6. naniesienie poprawnych encji na listę tokenów w formacie BIO.
+
+Funkcja zwraca trzy elementy:
+
+- pdf_tokens - tokeny dokumentu z uzupełnionymi etykietami BIO,
+- errors_entities - encje odrzucone podczas walidacji,
+- low_confidence_entities - encje z wynikiem score poniżej 0.8.
+
+W notatniku funkcja jest wywoływana w ten sposób:
+
+pdf_tokens, errors, low_conf = auto_NER_function(chunks, pdf_tokens)
+
+Po podstawowym mapowaniu encji na tokeny mogą zostać uruchomione dodatkowe
+funkcje walidujące wynik BIO na podstawie słowników z katalogu constants.
+
+Funkcja add_person_titles_to_bio(check_pdfs_tokens, PERSON_TITLES) rozszerza
+encje PERSON o tytuły znajdujące się przed imieniem. Funkcja szuka tokenów z
+etykietą B-PERSON, a następnie sprawdza tokeny poprzedzające. Jeżeli przed
+imieniem znajduje się tytuł z PERSON_TITLES, na przykład dr, prof, hab albo
+forma wielowyrazowa typu Szanowny doktorze habilitowany, pierwszy token tytułu
+otrzymuje etykietę B-PERSON, a kolejne tokeny tytułu oraz pierwotne imię
+otrzymują etykietę I-PERSON. Dzięki temu tytuł i imię z nazwiskiem tworzą jedną
+ciągłą encję osoby.
+
+Funkcja add_legal_forms_to_organization_bio(check_org_pdfs_tokens,
+FORMYPRAWNEORG) rozszerza encje ORGANIZATION o formy prawne znajdujące się przed
+albo po nazwie organizacji. Funkcja sprawdza tokeny sąsiadujące z encją
+B-ORGANIZATION/I-ORGANIZATION i dołącza te tokeny, które znajdują się w
+FORMYPRAWNEORG. Obsługiwane są również kropki w skrótach, na przykład sp. z
+o.o. albo s.a. Kropka jest dołączana tylko wtedy, gdy obok niej znajduje się
+token będący częścią formy prawnej, aby nie oznaczać zwykłej kropki kończącej
+zdanie jako elementu organizacji.
+
+Funkcja remove_invalid_city_tokens(pdfs_tokens, CITIES) sprawdza encje CITY
+utworzone po mapowaniu LOC_PUB na CITY. Funkcja zbiera pełny span miasta, czyli
+token B-CITY oraz następujące po nim tokeny I-CITY, i porównuje z listą CITIES.
+Jeżeli pełna nazwa nie znajduje się w słowniku miast, wszystkie tokeny tego
+spana dostają etykietę O. Dzięki temu nazwy wielowyrazowe, takie jak Biała
+Podlaska, pozostają oznaczone poprawnie, a błędne rozpoznania typu Sąd
+Najwyższy jako CITY są usuwane.
+
+13. Komórki pomocnicze dla Label Studio
+---------------------------------------
+
+W notatniku znajdują się też zakomentowane komórki przeznaczone do przygotowania
+danych dla Label Studio. Ich zadaniem jest:
+
+- zapis wyekstrahowanego tekstu do plików .txt,
+- zapis danych do plików .json w strukturze:
+
+{
+    "data": {
+        "text": "...",
+        "source": "nazwa_pliku.txt"
+    }
+}
+
+Te komórki są obecnie ujęte w potrójne cudzysłowy, więc nie wykonują się jako
+aktywna część programu. Zachowane zostały jako artefakty z procesu pracy nad projektem.
+
+14. Wynik działania programu
+----------------------------
+
+Końcowym wynikiem działania programu jest lista tokenów dokumentu PDF. Każdy
+token zawiera:
+
+- tekst tokenu,
+- pozycję początkową i końcową w pełnym tekście,
+- etykietę BIO wskazującą, czy token należy do rozpoznanej encji.
+
+Dodatkowo program zwraca:
+
+- listę encji błędnych lub niedopasowanych do tokenów,
+- listę encji o niskiej pewności modelu.
+
+Tak przygotowane dane mogą być użyte do dalszej analizy, ręcznej walidacji
+i co najważniejsze, zgodnie z wymaganiami zadania, wygenerowaniem pliku JSONL z końcowym raportem
+
+15. Najważniejsze ograniczenia obecnej wersji
+---------------------------------------------
+
+Obecna wersja jest prototypem i ma kilka ograniczeń:
+
+- przetwarzany jest jeden wybrany dokument PDF na raz ze względu na ograniczony czas
+  na wykonanie zadania oraz moc sprzętową,
+- funkcja classify_tokens tworzy pipeline modelu przy każdym wywołaniu, co może
+  znacząco spowalniać przetwarzanie wielu chunków,
+- mapowanie encji na tokeny zakłada, że lista encji jest niepusta i prawidłowo
+  uporządkowana
+
+16. Ogólny schemat przepływu danych
+-----------------------------------
+
+PDF
+ -> tekst wyciągnięty przez pdfplumber
+ -> tokeny z pozycjami znakowymi
+ -> chunki po 180 tokenów z overlapem 30
+ -> model NER lexedit/herbert-polish-legal-ner
+ -> filtrowanie typów encji
+ -> walidacja pozycji encji względem tokenów
+ -> oznaczenie encji o niskiej pewności
+ -> etykiety BIO wpisane do tokenów
+ -> walidacja tytułów osób, form prawnych organizacji i nazw miast
+ -> lista tokenów gotowa do dalszego użycia
